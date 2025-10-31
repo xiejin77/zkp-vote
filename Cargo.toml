@@ -1,0 +1,18 @@
+// 项目依赖配置文件
+
+[package]
+name = "zkp-vote"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-crypto-primitives = { version = "0.4", features = ["snark"] }
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-relations = "0.4"
+ark-circom = "0.4"
+ark-groth16 = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+warp = "0.3"

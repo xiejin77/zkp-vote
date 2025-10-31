@@ -1,0 +1,22 @@
+{
+  "name": "zkp-vote-blockchain",
+  "version": "1.0.0",
+  "description": "Blockchain interface for ZKP anonymous voting system",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js"
+  },
+  "dependencies": {
+    "ethers": "^5.7.0",
+    "web3": "^1.8.0"
+  },
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.2.0",
+    "@nomiclabs/hardhat-waffle": "^2.0.3",
+    "chai": "^4.3.6",
+    "ethereum-waffle": "^3.4.4",
+    "hardhat": "^2.11.0"
+  }
+}
