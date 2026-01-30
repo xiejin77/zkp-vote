@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { sendThroughMixNetwork } from '@/lib/anon-network';
-import { getUserIdentifier, hasUserVoted, recordUserVote, validateVote, validateUserId } from '@/lib/auth';
+import { sendThroughMixNetwork, checkNetworkConnectivity } from '@/lib/anon-network';
+import { getUserIdentifier, hasUserVoted, recordUserVote, validateVote, validateUserId, generateNullifier } from '@/lib/auth';
 
 // 支持的区块链网络
 const SUPPORTED_CHAINS = [
@@ -12,6 +12,12 @@ const SUPPORTED_CHAINS = [
   { id: 'localhost', name: 'Localhost', icon: 'local' }
 ];
 
+// 投票选项配置
+const VOTE_OPTIONS = [
+  { id: 0, name: '选项 0' },
+  { id: 1, name: '选项 1' }
+];
+
 export default function Home() {
   const [vote, setVote] = useState<number | null>(null);
   const [userId, setUserId] = useState('');
@@ -20,6 +26,8 @@ export default function Home() {
   const [hasVoted, setHasVoted] = useState(false);
   const [gasOption, setGasOption] = useState<'direct' | 'relayer'>('relayer');
   const [selectedChain, setSelectedChain] = useState('localhost'); // 默认选择本地网络
+  const [networkStatus, setNetworkStatus] = useState<{ connected: boolean; message: string } | null>(null);
+  const [isCheckingNetwork, setIsCheckingNetwork] = useState(false);
 
   useEffect(() => {
     // 页面加载时检查用户是否已投票
@@ -29,7 +37,29 @@ export default function Home() {
     // 获取或生成用户标识
     const identifier = getUserIdentifier();
     setUserId(identifier);
+    
+    // 检查网络连接
+    checkNetwork();
   }, []);
+
+  // 检查网络连接
+  const checkNetwork = async () => {
+    setIsCheckingNetwork(true);
+    try {
+      const isConnected = await checkNetworkConnectivity();
+      setNetworkStatus({
+        connected: isConnected,
+        message: isConnected ? '网络连接正常' : '网络连接异常，请检查您的网络'
+      });
+    } catch (error) {
+      setNetworkStatus({
+        connected: false,
+        message: '网络检查失败，请检查您的网络连接'
+      });
+    } finally {
+      setIsCheckingNetwork(false);
+    }
+  };
 
   const handleSubmit = async () => {
     // 验证投票选择
@@ -46,17 +76,27 @@ export default function Home() {
       return;
     }
 
+    // 检查网络连接
+    if (!networkStatus?.connected) {
+      setResult({ success: false, message: '网络连接异常，请检查您的网络后重试' });
+      return;
+    }
+
     setIsSubmitting(true);
     setResult(null);
 
     try {
+      // 生成防重标识
+      const nullifier = generateNullifier(userId);
+
       // 构造投票数据
       const voteData = {
         vote,
         user_id: userId,
+        nullifier,
         timestamp: Date.now(),
         gas_option: gasOption,
-        chain: selectedChain // 添加链选项
+        chain: selectedChain
       };
 
       // 通过混合网络发送投票请求
@@ -112,6 +152,22 @@ export default function Home() {
       <div className="max-w-md w-full bg-white rounded-lg shadow-md p-6">
         <h1 className="text-2xl font-bold text-center text-gray-800 mb-6">匿名投票系统</h1>
         
+        {/* 网络状态显示 */}
+        {networkStatus && (
+          <div className={`mb-4 p-2 rounded-md ${networkStatus.connected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+            <div className="flex items-center justify-between">
+              <span>{networkStatus.message}</span>
+              <button 
+                onClick={checkNetwork}
+                disabled={isCheckingNetwork}
+                className="text-sm text-blue-600 hover:text-blue-800 focus:outline-none"
+              >
+                {isCheckingNetwork ? '检查中...' : '重新检查'}
+              </button>
+            </div>
+          </div>
+        )}
+        
         <div className="mb-6">
           <label htmlFor="userId" className="block text-sm font-medium text-gray-700 mb-2">
             用户ID
@@ -134,26 +190,18 @@ export default function Home() {
             请选择您的投票选项
           </p>
           <div className="space-y-2">
-            <label className="flex items-center">
-              <input
-                type="radio"
-                name="vote"
-                checked={vote === 0}
-                onChange={() => setVote(0)}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500"
-              />
-              <span className="ml-3 text-gray-700">选项 0</span>
-            </label>
-            <label className="flex items-center">
-              <input
-                type="radio"
-                name="vote"
-                checked={vote === 1}
-                onChange={() => setVote(1)}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500"
-              />
-              <span className="ml-3 text-gray-700">选项 1</span>
-            </label>
+            {VOTE_OPTIONS.map((option) => (
+              <label key={option.id} className="flex items-center">
+                <input
+                  type="radio"
+                  name="vote"
+                  checked={vote === option.id}
+                  onChange={() => setVote(option.id)}
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="ml-3 text-gray-700">{option.name}</span>
+              </label>
+            ))}
           </div>
         </div>
         
@@ -207,9 +255,11 @@ export default function Home() {
         
         <button
           onClick={handleSubmit}
-          disabled={isSubmitting}
+          disabled={isSubmitting || !networkStatus?.connected}
           className={`w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
             isSubmitting 
+              ? 'bg-gray-400 cursor-not-allowed' 
+              : !networkStatus?.connected
               ? 'bg-gray-400 cursor-not-allowed' 
               : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'
           }`}

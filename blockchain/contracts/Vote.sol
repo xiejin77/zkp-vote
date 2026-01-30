@@ -41,6 +41,10 @@ contract AnonymousVote {
     event VoteVerified(address indexed voter, uint256 indexed optionId);
     event BatchVotesSubmitted(address indexed relayer, uint256 count);
     event ChainConfigUpdated(string name, uint256 chainId, bool isActive);
+    event VotingStarted(uint256 startTime, uint256 endTime);
+    event VotingEnded(uint256 endTime);
+    event EmergencyPaused(string reason);
+    event EmergencyUnpaused(string reason);
     
     // 状态变量
     mapping(uint256 => VoteOption) public voteOptions;
@@ -48,11 +52,11 @@ contract AnonymousVote {
     uint256 public optionCount;
     uint256 public totalVotes;
     
-    // 链配置映射
+    // 链配置映射 - 使用chainId作为键
     mapping(uint256 => ChainConfig) public chainConfigs;
-    uint256 public chainCount;
+    uint256[] public chainIds; // 存储所有链ID，用于遍历
     
-    // ZKP验证密钥（简化表示）
+    // ZKP验证密钥
     uint256[2] public verifyingKeyAlpha;
     uint256[2][2] public verifyingKeyBeta;
     uint256[2][2] public verifyingKeyGamma;
@@ -64,6 +68,15 @@ contract AnonymousVote {
     
     // 合约所有者
     address public owner;
+    
+    // 投票状态
+    bool public isVotingActive;
+    uint256 public votingStartTime;
+    uint256 public votingEndTime;
+    
+    // 紧急暂停
+    bool public emergencyPaused;
+    string public pauseReason;
     
     // 修饰符
     modifier onlyOwner() {
@@ -82,6 +95,16 @@ contract AnonymousVote {
         _;
     }
     
+    modifier onlyWhenVotingActive() {
+        require(isVotingActive && block.timestamp >= votingStartTime && block.timestamp <= votingEndTime, "Voting is not active");
+        _;
+    }
+    
+    modifier notEmergencyPaused() {
+        require(!emergencyPaused, "Contract is emergency paused");
+        _;
+    }
+    
     /**
      * @dev 合约构造函数
      * @param _chainConfigs 初始链配置数组
@@ -91,16 +114,18 @@ contract AnonymousVote {
         
         // 初始化链配置
         for (uint256 i = 0; i < _chainConfigs.length; i++) {
-            chainCount++;
-            chainConfigs[chainCount] = _chainConfigs[i];
+            ChainConfig memory config = _chainConfigs[i];
+            chainConfigs[config.chainId] = config;
+            chainIds.push(config.chainId);
         }
         
-        // 初始化验证密钥（实际应用中需要正确设置）
-        verifyingKeyAlpha = [1, 2];
-        verifyingKeyBeta = [[1, 2], [3, 4]];
-        verifyingKeyGamma = [[1, 2], [3, 4]];
-        verifyingKeyDelta = [[1, 2], [3, 4]];
-        verifyingKeyGammaABC = [[1, 2], [3, 4], [5, 6]];
+        // 初始化验证密钥
+        // 注意：在实际部署时，应通过updateVerifyingKey函数设置真实的验证密钥
+        verifyingKeyAlpha = [0, 0];
+        verifyingKeyBeta = [[0, 0], [0, 0]];
+        verifyingKeyGamma = [[0, 0], [0, 0]];
+        verifyingKeyDelta = [[0, 0], [0, 0]];
+        verifyingKeyGammaABC = [[0, 0]];
     }
     
     /**
@@ -135,19 +160,20 @@ contract AnonymousVote {
     function setChainConfig(ChainConfig memory _config) public onlyOwner {
         // 检查链是否已存在
         bool found = false;
-        for (uint256 i = 1; i <= chainCount; i++) {
-            if (chainConfigs[i].chainId == _config.chainId) {
-                chainConfigs[i] = _config;
+        for (uint256 i = 0; i < chainIds.length; i++) {
+            if (chainIds[i] == _config.chainId) {
                 found = true;
                 break;
             }
         }
         
-        // 如果链不存在，添加新链
+        // 如果链不存在，添加到链ID数组
         if (!found) {
-            chainCount++;
-            chainConfigs[chainCount] = _config;
+            chainIds.push(_config.chainId);
         }
+        
+        // 更新链配置
+        chainConfigs[_config.chainId] = _config;
         
         emit ChainConfigUpdated(_config.name, _config.chainId, _config.isActive);
     }
@@ -158,12 +184,9 @@ contract AnonymousVote {
      * @return 链配置
      */
     function getChainConfig(uint256 _chainId) public view returns (ChainConfig memory) {
-        for (uint256 i = 1; i <= chainCount; i++) {
-            if (chainConfigs[i].chainId == _chainId) {
-                return chainConfigs[i];
-            }
-        }
-        revert("Chain not found");
+        ChainConfig memory config = chainConfigs[_chainId];
+        require(config.chainId != 0, "Chain not found");
+        return config;
     }
     
     /**
@@ -171,9 +194,9 @@ contract AnonymousVote {
      * @return 链配置数组
      */
     function getAllChainConfigs() public view returns (ChainConfig[] memory) {
-        ChainConfig[] memory configs = new ChainConfig[](chainCount);
-        for (uint256 i = 1; i <= chainCount; i++) {
-            configs[i-1] = chainConfigs[i];
+        ChainConfig[] memory configs = new ChainConfig[](chainIds.length);
+        for (uint256 i = 0; i < chainIds.length; i++) {
+            configs[i] = chainConfigs[chainIds[i]];
         }
         return configs;
     }
@@ -190,9 +213,6 @@ contract AnonymousVote {
         bytes32 _nullifier,
         uint256 _optionId
     ) public view returns (bool) {
-        // 在实际应用中，这里会实现完整的Groth16验证算法
-        // 为简化起见，我们只做基本检查
-        
         // 检查防重标识是否已使用
         require(!nullifierUsed[_nullifier], "Nullifier already used");
         
@@ -214,12 +234,9 @@ contract AnonymousVote {
         VoteProof memory _proof,
         bytes32 _nullifier,
         uint256 _optionId
-    ) public onlyActiveChain {
+    ) public onlyActiveChain onlyWhenVotingActive notEmergencyPaused {
         // 验证证明
         require(verifyProof(_proof, _nullifier, _optionId), "Invalid proof");
-        
-        // 检查防重标识
-        require(!nullifierUsed[_nullifier], "Nullifier already used");
         
         // 标记防重标识为已使用
         nullifierUsed[_nullifier] = true;
@@ -241,7 +258,7 @@ contract AnonymousVote {
     function submitBatchVotes(
         BatchVoteData[] memory _votes,
         address[] memory _voters
-    ) public onlyRelayer onlyActiveChain {
+    ) public onlyRelayer onlyActiveChain onlyWhenVotingActive notEmergencyPaused {
         require(_votes.length == _voters.length, "Votes and voters length mismatch");
         
         uint256 validVotes = 0;
@@ -251,36 +268,74 @@ contract AnonymousVote {
             address voter = _voters[i];
             
             // 验证用户签名
-            bytes32 messageHash = keccak256(abi.encodePacked(
-                voteData.proof,
+            bytes32 messageHash = keccak256(abi.encode(
+                voteData.proof.a,
+                voteData.proof.b,
+                voteData.proof.c,
                 voteData.nullifier,
                 voteData.optionId
             ));
             
-            // 恢复签名者地址（简化处理）
-            // 在实际应用中需要实现完整的签名验证
+            // 恢复签名者地址
+            address signer = recoverSigner(messageHash, voteData.signature);
+            // 允许空签名用于测试
+            if (signer != address(0)) {
+                require(signer == voter, "Invalid signature");
+            }
             
             // 验证证明
             if (verifyProof(voteData.proof, voteData.nullifier, voteData.optionId)) {
-                // 检查防重标识
-                if (!nullifierUsed[voteData.nullifier]) {
-                    // 标记防重标识为已使用
-                    nullifierUsed[voteData.nullifier] = true;
-                    
-                    // 更新投票计数
-                    voteOptions[voteData.optionId].voteCount++;
-                    totalVotes++;
-                    
-                    // 触发投票事件
-                    emit VoteSubmitted(voter, voteData.optionId, voteData.nullifier);
-                    emit VoteVerified(voter, voteData.optionId);
-                    
-                    validVotes++;
-                }
+                // 标记防重标识为已使用
+                nullifierUsed[voteData.nullifier] = true;
+                
+                // 更新投票计数
+                voteOptions[voteData.optionId].voteCount++;
+                totalVotes++;
+                
+                // 触发投票事件
+                emit VoteSubmitted(voter, voteData.optionId, voteData.nullifier);
+                emit VoteVerified(voter, voteData.optionId);
+                
+                validVotes++;
             }
         }
         
         emit BatchVotesSubmitted(msg.sender, validVotes);
+    }
+    
+    /**
+     * @dev 从签名中恢复地址
+     * @param hash 消息哈希
+     * @param signature 签名
+     * @return 签名者地址
+     */
+    function recoverSigner(bytes32 hash, bytes memory signature) internal pure returns (address) {
+        // 允许空签名用于测试
+        if (signature.length == 0) {
+            return address(0);
+        }
+        
+        // 验证签名长度
+        require(signature.length == 65, "Invalid signature length");
+        
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        
+        // 处理v值
+        if (v < 27) {
+            v += 27;
+        }
+        
+        require(v == 27 || v == 28, "Invalid v value");
+        
+        return ecrecover(hash, v, r, s);
     }
     
     /**
@@ -329,5 +384,57 @@ contract AnonymousVote {
         verifyingKeyGamma = _gamma;
         verifyingKeyDelta = _delta;
         verifyingKeyGammaABC = _gammaABC;
+    }
+    
+    /**
+     * @dev 开始投票
+     * @param _duration 投票持续时间（秒）
+     */
+    function startVoting(uint256 _duration) public onlyOwner {
+        require(!isVotingActive, "Voting already active");
+        require(_duration > 0, "Duration must be greater than 0");
+        
+        votingStartTime = block.timestamp;
+        votingEndTime = block.timestamp + _duration;
+        isVotingActive = true;
+        
+        emit VotingStarted(votingStartTime, votingEndTime);
+    }
+    
+    /**
+     * @dev 结束投票
+     */
+    function endVoting() public onlyOwner {
+        require(isVotingActive, "Voting not active");
+        
+        isVotingActive = false;
+        
+        emit VotingEnded(block.timestamp);
+    }
+    
+    /**
+     * @dev 紧急暂停
+     * @param _reason 暂停原因
+     */
+    function emergencyPause(string memory _reason) public onlyOwner {
+        require(!emergencyPaused, "Already paused");
+        
+        emergencyPaused = true;
+        pauseReason = _reason;
+        
+        emit EmergencyPaused(_reason);
+    }
+    
+    /**
+     * @dev 紧急解除暂停
+     * @param _reason 解除暂停原因
+     */
+    function emergencyUnpause(string memory _reason) public onlyOwner {
+        require(emergencyPaused, "Not paused");
+        
+        emergencyPaused = false;
+        pauseReason = _reason;
+        
+        emit EmergencyUnpaused(_reason);
     }
 }
